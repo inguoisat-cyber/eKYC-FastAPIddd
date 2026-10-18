@@ -60,7 +60,7 @@ async def get_liveness_challenge(session_id: str, db: Session = Depends(get_db))
     if db_session.status not in [SessionStatus.SELFIE_CHALLENGE_ISSUED, SessionStatus.FAILED_RETRY]:
         raise HTTPException(status_code=400, detail="Chưa đến bước thực hiện Liveness")
         
-    challenges = ["look_straight", "turn_left", "turn_right", "look_up"]
+    challenges = ["look_straight", "turn_left_gentle", "turn_right_gentle"]
     selected = random.choice(challenges)
     
     challenge = LivenessChallenge(

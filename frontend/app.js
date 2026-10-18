@@ -1,6 +1,17 @@
 document.addEventListener('DOMContentLoaded', () => {
     const statusSpan = document.querySelector('.status');
     const appDiv = document.getElementById('app');
+
+    // Helper: safely parse JSON from a fetch response, handling non-JSON error bodies
+    async function safeJson(response) {
+        const text = await response.text();
+        try {
+            return JSON.parse(text);
+        } catch (e) {
+            // Server returned non-JSON (e.g. "Internal Server Error")
+            return { detail: text || `HTTP ${response.status}` };
+        }
+    }
     
     let currentSessionId = null;
 
@@ -11,7 +22,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' }
             });
-            const data = await response.json();
+            const data = await safeJson(response);
             
             if (response.ok) {
                 currentSessionId = data.id;
@@ -47,7 +58,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     stepDiv.innerHTML += `<p class="status">Đã đồng ý (CONSENTED)</p>`;
                     renderDocumentFrontStep();
                 } else {
-                    const data = await res.json();
+                    const data = await safeJson(res);
                     alert(`Lỗi: ${data.detail}`);
                 }
             } catch (error) {
@@ -131,7 +142,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         method: 'POST',
                         body: formData
                     });
-                    const data = await res.json();
+                    const data = await safeJson(res);
                     if (res.ok) {
                         document.getElementById('front-upload-status').textContent = 'Đã lưu ảnh mặt trước.';
                         btnCapture.style.display = 'none';
@@ -217,7 +228,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         method: 'POST',
                         body: formData
                     });
-                    const data = await res.json();
+                    const data = await safeJson(res);
                     if (res.ok) {
                         document.getElementById('back-upload-status').textContent = 'Đã lưu mặt sau.';
                         btnCapture.style.display = 'none';
@@ -247,25 +258,22 @@ document.addEventListener('DOMContentLoaded', () => {
             // Gọi API OCR, QR, Face sequentially with early exits on error
             try {
                 const ocrRes = await fetch(`/api/kyc/ocr?session_id=${currentSessionId}`, { method: 'POST' });
+                const ocrData = await safeJson(ocrRes);
                 if (!ocrRes.ok) {
-                    const err = await ocrRes.json();
-                    throw new Error(`OCR Failed: ${err.detail}`);
+                    throw new Error(`OCR Failed: ${ocrData.detail || 'Unknown error'}`);
                 }
-                const ocrData = await ocrRes.json();
                 
                 const qrRes = await fetch(`/api/kyc/qr?session_id=${currentSessionId}`, { method: 'POST' });
+                const qrData = await safeJson(qrRes);
                 if (!qrRes.ok) {
-                    const err = await qrRes.json();
-                    throw new Error(`QR Failed: ${err.detail}`);
+                    throw new Error(`QR Failed: ${qrData.detail || 'Unknown error'}`);
                 }
-                const qrData = await qrRes.json();
                 
                 const faceRes = await fetch(`/api/kyc/face/extract?session_id=${currentSessionId}`, { method: 'POST' });
+                const faceData = await safeJson(faceRes);
                 if (!faceRes.ok) {
-                    const err = await faceRes.json();
-                    throw new Error(`Face Extract Failed: ${err.detail}`);
+                    throw new Error(`Face Extract Failed: ${faceData.detail || 'Unknown error'}`);
                 }
-                const faceData = await faceRes.json();
                 
                 document.getElementById('ocr-status').textContent = '✅ Xử lý AI thành công (Trạng thái: SELFIE_CHALLENGE_ISSUED)';
                 document.getElementById('ocr-status').style.color = 'green';
@@ -310,24 +318,25 @@ document.addEventListener('DOMContentLoaded', () => {
         
         try {
             const res = await fetch(`/api/kyc/liveness/challenge?session_id=${currentSessionId}`);
-            const data = await res.json();
+            const data = await safeJson(res);
             
             if(res.ok) {
                 const actionMap = {
-                    "look_straight": "NHÌN THẲNG",
-                    "turn_left": "QUAY MẶT SANG TRÁI",
-                    "turn_right": "QUAY MẶT SANG PHẢI",
-                    "look_up": "NGƯỚC MẶT LÊN TRÊN"
+                    "look_straight": "NHÌN THẲNG VÀO CAMERA",
+                    "turn_left_gentle": "NGHIÊNG NHẸ SANG TRÁI 👈",
+                    "turn_right_gentle": "NGHIÊNG NHẸ SANG PHẢI 👉",
+                    "turn_left": "NGHIÊNG NHẸ SANG TRÁI 👈",
+                    "turn_right": "NGHIÊNG NHẸ SANG PHẢI 👉"
                 };
                 
                 stepDiv.innerHTML = `
-                    <h3>Bước 3: Thử thách Liveness</h3>
-                    <p style="font-size: 16px;">Vui lòng đưa khuôn mặt vào trong khung hình oval và thực hiện theo yêu cầu:</p>
+                    <h3>Bước 3: Xác thực khuôn mặt (Selfie)</h3>
+                    <p style="font-size: 16px;">Vui lòng giữ khuôn mặt trong khung hình oval và <strong>nhìn thẳng vào camera</strong>:</p>
                     <div class="camera-container" style="margin-bottom: 10px;">
                         <video id="camera-liveness" autoplay playsinline style="transform: scaleX(-1);"></video>
                         <div class="oval-overlay" id="liveness-oval"></div>
                         <div class="overlay-instruction" id="liveness-instruction">
-                            <span style="font-size: 20px; color: #fff;">${actionMap[data.challenge_type] || data.challenge_type}</span>
+                            <span style="font-size: 20px; color: #fff;">${actionMap[data.challenge_type] || "NHÌN THẲNG VÀO CAMERA"}</span>
                         </div>
                     </div>
                     <button id="btn-capture-liveness">Chụp Selfie xác nhận</button>
@@ -408,7 +417,7 @@ document.addEventListener('DOMContentLoaded', () => {
                                 method: 'POST',
                                 body: formData
                             });
-                            const verifyData = await verifyRes.json();
+                            const verifyData = await safeJson(verifyRes);
                             
                             if (verifyRes.ok && verifyData.success && verifyData.session_status !== 'FAILED_RETRY') {
                                 if (window.livenessInterval) clearInterval(window.livenessInterval);
@@ -446,7 +455,7 @@ document.addEventListener('DOMContentLoaded', () => {
                                     btnRetry.style.display = 'inline-block';
                                     
                                     if (verifyData.session_status === 'FAILED_RETRY') {
-                                        errorMsg = "Khuôn mặt không khớp hoặc rủi ro cao. Vui lòng thử lại.";
+                                        errorMsg = "Khuôn mặt không khớp hoặc điểm rủi ro cao. Vui lòng thử lại.";
                                     }
                                     
                                     document.getElementById('liveness-status').innerHTML = `

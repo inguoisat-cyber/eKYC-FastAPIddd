@@ -45,6 +45,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Global exception handler: đảm bảo mọi lỗi đều trả về JSON, tránh plain text "Internal Server Error"
+from fastapi.responses import JSONResponse
+from fastapi import Request
+import traceback
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {str(exc)}"}
+    )
+
 # Setup directories if not exist
 os.makedirs(settings.STORAGE_DIR, exist_ok=True)
 os.makedirs(MODELS_DIR, exist_ok=True)

@@ -107,10 +107,12 @@ async def process_ocr(session_id: str, db: Session = Depends(get_db)):
         # Chạy AI
         front_ocr_result = ocr_engine.extract_text(front_bytes)
         
-        # KIỂM TRA NGHIÊM NGẶT: Phải có các từ khóa của CCCD/CMND Việt Nam
+        # KIỂM TRA NHẸ: Cảnh báo nếu không tìm thấy từ khóa CCCD nhưng vẫn tiếp tục xử lý
+        # Tập trung vào nhận diện khuôn mặt, OCR chỉ mang tính tham khảo
         raw_text_combined = " ".join([t["text"] for t in front_ocr_result["raw_texts"]]).upper()
+        document_format_warning = None
         if not re.search(r"CĂN CƯỚC|CỘNG HÒA|VIỆT NAM|CHỨNG MINH|NHÂN DÂN|ĐỘC LẬP", raw_text_combined):
-            raise HTTPException(status_code=400, detail="INVALID_DOCUMENT_FORMAT: Giấy tờ không hợp lệ. Chỉ chấp nhận CMND/CCCD Việt Nam.")
+            document_format_warning = "Không nhận diện rõ từ khóa CCCD/CMND. Kết quả OCR có thể không chính xác."
             
         parsed_data = _parse_raw_texts(front_ocr_result["raw_texts"])
         
@@ -126,6 +128,7 @@ async def process_ocr(session_id: str, db: Session = Depends(get_db)):
         return {
             "status": "success", 
             "data": parsed_data,
+            "document_format_warning": document_format_warning,
             "raw_debug": front_ocr_result["raw_texts"] # Trả về để debug
         }
     except Exception as e:

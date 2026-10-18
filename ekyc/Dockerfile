@@ -7,9 +7,9 @@ WORKDIR /app
 
 # Thứ tự layer: dependency -> model -> code (đổi code không phải tải lại model/thư viện)
 COPY pyproject.toml .
-RUN pip install .
+RUN pip install ".[ocr]"
 COPY download_models.py .
-RUN python download_models.py
+RUN python download_models.py --ocr
 
 COPY backend backend
 COPY frontend frontend

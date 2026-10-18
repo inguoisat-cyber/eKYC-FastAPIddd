@@ -1,5 +1,7 @@
 import difflib
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
@@ -58,8 +60,13 @@ def parse_qr(raw: str) -> dict | None:
 
 # ── OCR dự phòng (tuỳ chọn, chỉ khi không đọc được QR) ────────────────────
 _reader = None
+_reader_lock = threading.Lock()
 _DIGITS = str.maketrans("OoDIliZzASsbBgq", "000111224556899")
-_NOT_NAME = re.compile(r"CĂN CƯỚC|CỘNG HÒA|ĐỘC LẬP|VIỆT NAM|CHỨNG MINH|NHÂN DÂN", re.I)
+_NOT_NAME = re.compile(
+    r"CĂN CƯỚC|CAN CUOC|CỘNG HÒA|CONG HOA|ĐỘC LẬP|DOC LAP|VIỆT NAM|VIET NAM|"
+    r"CHỨNG MINH|CHUNG MINH|NHÂN DÂN|NHAN DAN",
+    re.I,
+)
 _NAME_LABEL = re.compile(r"họ\s*(và)?\s*tên|full\s*name", re.I)
 
 
@@ -82,12 +89,17 @@ def parse_ocr(lines: list[str]) -> dict | None:
 
 def ocr_fallback(img: np.ndarray) -> dict | None:
     global _reader
-    try:
-        if _reader is None:
-            import easyocr
-            _reader = easyocr.Reader(["vi", "en"], gpu=False, model_storage_directory=str(settings.MODELS_DIR / "easyocr"))
-    except ImportError:
-        return None
+    if _reader is None:
+        with _reader_lock:
+            if _reader is None:
+                try:
+                    import easyocr
+                except ImportError as exc:
+                    raise RuntimeError('OCR is enabled but EasyOCR is missing. Install with: pip install -e ".[ocr]"') from exc
+                _reader = easyocr.Reader(
+                    ["vi", "en"], gpu=False,
+                    model_storage_directory=str(settings.MODELS_DIR / "easyocr"),
+                )
     k = 1280 / max(img.shape[:2])
     if k < 1:
         img = cv2.resize(img, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
@@ -95,44 +107,63 @@ def ocr_fallback(img: np.ndarray) -> dict | None:
 
 
 def compare_qr_ocr(qr_info: dict | None, ocr_info: dict | None, *, tolerance: float = 0.82) -> dict:
-    """So sánh dữ liệu QR và OCR. Nếu cả hai cùng nguồn/cùng khóa chính thì mặc định pass."""
+    """So sánh QR và OCR, cho phép sai khác nhỏ do OCR nhưng không bỏ qua trường bị lệch."""
     if qr_info is None and ocr_info is None:
         return {"valid": False, "reason": "no_data"}
     if qr_info is None or ocr_info is None:
         return {"valid": True, "reason": "one_source_missing", "source": "qr" if qr_info else "ocr"}
+    qr_id = qr_info.get("id_number")
+    ocr_id = ocr_info.get("id_number")
+    qr_dob = re.sub(r"\D", "", qr_info.get("dob") or "")
+    ocr_dob = re.sub(r"\D", "", ocr_info.get("dob") or "")
     matches = {
-        "id_number": qr_info.get("id_number") == ocr_info.get("id_number") or (
-            qr_info.get("id_number") and ocr_info.get("id_number") and
-            len(qr_info.get("id_number", "")) == len(ocr_info.get("id_number", ""))
-        ),
+        "id_number": _fuzzy_match(qr_id, ocr_id, threshold=0.88),
         "full_name": _fuzzy_match(qr_info.get("full_name"), ocr_info.get("full_name"), threshold=tolerance),
-        "dob": qr_info.get("dob") == ocr_info.get("dob") or (
-            qr_info.get("dob") and ocr_info.get("dob") and qr_info.get("dob")[-4:] == ocr_info.get("dob")[-4:]
-        ),
+        "dob": _fuzzy_match(qr_dob, ocr_dob, threshold=0.87),
     }
     valid = all(matches.values())
-    return {"valid": valid, "matches": matches, "qr": qr_info, "ocr": ocr_info}
+    return {"valid": valid, "matches": matches}
 
 
-def read_info(front: np.ndarray, back: np.ndarray) -> dict | None:
-    """QR là nguồn chính xác nhất; OCR chạy song song để đối chiếu, không còn chỉ là fallback."""
-    qr_candidates = []
-    ocr_candidates = []
+def _read_qr_candidates(front: np.ndarray, back: np.ndarray) -> list[dict]:
+    candidates = []
     for img in (front, back):
         raw = read_qr(img)
         if raw and (info := parse_qr(raw)):
-            qr_candidates.append(info)
-        if settings.OCR_FALLBACK:
-            ocr = ocr_fallback(img)
-            if ocr:
-                ocr_candidates.append(ocr)
+            candidates.append(info)
+    return candidates
+
+
+def _read_ocr_candidates(front: np.ndarray, back: np.ndarray) -> list[dict]:
+    candidates = []
+    for img in (front, back):
+        info = ocr_fallback(img)
+        if info:
+            candidates.append(info)
+    return candidates
+
+
+def read_info(front: np.ndarray, back: np.ndarray) -> dict | None:
+    """Chạy QR và OCR đồng thời trên cả hai mặt; QR ưu tiên làm nguồn dữ liệu chính."""
+    if settings.OCR_FALLBACK:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            qr_future = pool.submit(_read_qr_candidates, front, back)
+            ocr_future = pool.submit(_read_ocr_candidates, front, back)
+            qr_candidates = qr_future.result()
+            ocr_candidates = ocr_future.result()
+    else:
+        qr_candidates = _read_qr_candidates(front, back)
+        ocr_candidates = []
+
     if qr_candidates:
         primary = qr_candidates[0]
-        if ocr_candidates:
-            comparison = compare_qr_ocr(primary, ocr_candidates[0])
-            if not comparison["valid"]:
-                primary["cross_check_warning"] = comparison
+        comparison = compare_qr_ocr(primary, ocr_candidates[0] if ocr_candidates else None)
+        primary["read_sources"] = {"qr": True, "ocr": bool(ocr_candidates)}
+        primary["cross_check"] = comparison
         return primary
     if ocr_candidates:
-        return ocr_candidates[0]
+        primary = ocr_candidates[0]
+        primary["read_sources"] = {"qr": False, "ocr": True}
+        primary["cross_check"] = compare_qr_ocr(None, primary)
+        return primary
     return None

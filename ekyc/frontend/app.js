@@ -126,13 +126,25 @@ async function processDocs() {
 
 // ── 4. Liveness + so khớp khuôn mặt ──────────────────────────────────
 async function livenessStep(info) {
-  view(3, `<h2>Xác thực khuôn mặt</h2><p class="muted" id="who"></p>
+  view(3, `<h2>Xác thực khuôn mặt</h2><p class="muted" id="who"></p><p class="muted" id="doccheck"></p>
     <div class="cam"><video playsinline muted style="transform:scaleX(-1)"></video><div class="oval"></div><div class="tip">Đang khởi động camera…</div></div>
     <div id="res"></div>`);
   const token = run;
-  const [v, oval, tip] = ['video', '.oval', '.tip'].map($);
-  if (info) $('#who').textContent = `Đã đọc: ${[info.full_name, info.id_number].filter(Boolean).join(' · ')}`;
-  else $('#who').textContent = 'Không đọc được mã QR trên thẻ — bạn vẫn có thể tiếp tục xác thực khuôn mặt.';
+  const [v, oval, tip, doccheck] = ['video', '.oval', '.tip', '#doccheck'].map($);
+  if (info) {
+    const identity = [info.full_name, info.id_number].filter(Boolean).join(' · ');
+    $('#who').textContent = identity
+      ? `Đã đọc: ${identity}`
+      : 'Đã quét giấy tờ nhưng chưa trích xuất được tên hoặc số định danh.';
+  } else $('#who').textContent = 'Không đọc được thông tin QR/OCR trên thẻ — bạn vẫn có thể tiếp tục xác thực khuôn mặt.';
+  if (info?.read_sources) {
+    const sources = `${info.read_sources.qr ? 'QR ✓' : 'QR không đọc được'} · ${info.read_sources.ocr ? 'OCR ✓' : 'OCR không đọc được'}`;
+    const check = info.cross_check;
+    doccheck.textContent = check?.valid === false
+      ? `${sources} — CẢNH BÁO: dữ liệu QR và OCR lệch ở ${Object.entries(check.matches || {}).filter(([, match]) => !match).map(([key]) => key).join(', ') || 'nguồn dữ liệu'}.`
+      : `${sources}${check?.reason === 'one_source_missing' ? ' · Chưa thể đối chiếu đủ hai nguồn.' : ' · Đã đối chiếu.'}`;
+    if (check?.valid === false) doccheck.classList.add('err');
+  }
 
   let ch;
   try {

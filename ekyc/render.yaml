@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: ekyc-demo
+    runtime: docker
+    plan: standard
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATA_DIR
+        value: /var/data
+      - key: OCR_FALLBACK
+        value: "true"
+      - key: ENCRYPTION_KEY
+        generateValue: true
+    disk:
+      name: ekyc-data
+      mountPath: /var/data
+      sizeGB: 1

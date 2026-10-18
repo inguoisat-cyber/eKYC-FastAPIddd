@@ -130,3 +130,9 @@ def test_parsers():
     assert (o["id_number"], o["full_name"], o["dob"]) == ("012345678901", "NGUYỄN VĂN A", "01/01/1990")  # bản cũ lấy nhầm ngày hết hạn
     assert docs.parse_ocr(["Họ và tên", "Full name:", "TRẦN THỊ B"])["full_name"] == "TRẦN THỊ B"
     assert docs.parse_ocr(["blah"]) is None
+    assert docs.parse_ocr(["CAN CUOC CONG DAN"]) is None
+    qr_info = docs.parse_qr(QR)
+    ocr_info = {"id_number": "012345678991", "full_name": "NGUYEN VAN A", "dob": "01/01/1990"}
+    assert docs.compare_qr_ocr(qr_info, ocr_info)["valid"]  # tolerate one OCR digit error
+    ocr_info["id_number"] = "999999999999"
+    assert not docs.compare_qr_ocr(qr_info, ocr_info)["valid"]

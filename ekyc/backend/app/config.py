@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE: int = 5 * 1024 * 1024
     MAX_CHALLENGES: int = 5               # số lần thử selfie / phiên
     AI_CONCURRENCY: int = 2               # số suy luận AI chạy song song
-    OCR_FALLBACK: bool = False            # chạy EasyOCR khi không đọc được QR (pip install ".[ocr]")
+    OCR_FALLBACK: bool = True             # chạy EasyOCR song song QR; pip install ".[ocr]"
 
 
 settings = Settings()

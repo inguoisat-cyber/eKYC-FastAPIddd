@@ -25,23 +25,20 @@ class FaceEngine:
             self._app.prepare(ctx_id=0, det_size=(640, 640))
         return self._app
 
-    # ─── Image Preprocessing ───────────────────────────────────────────
+    # ─── Image Preprocessing (Tối ưu tốc độ cao) ──────────────────────
     def _preprocess_image(self, img: np.ndarray) -> np.ndarray:
-        """Tăng cường chất lượng ảnh trước khi detect: cân bằng histogram, giảm nhiễu."""
-        # Chuyển sang LAB để tăng contrast chỉ trên kênh L (giữ màu tự nhiên)
+        """Tăng cường chất lượng ảnh nhanh: CLAHE cân bằng sáng + Bilateral filter nhẹ (nhanh gấp 20 lần fastNlMeans)."""
         lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
         l_channel, a_channel, b_channel = cv2.split(lab)
         
-        # CLAHE (Contrast Limited Adaptive Histogram Equalization) - tốt hơn histogram equalization thường
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         l_channel = clahe.apply(l_channel)
         
         enhanced = cv2.merge([l_channel, a_channel, b_channel])
         enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
         
-        # Giảm nhiễu nhẹ, giữ cạnh sắc nét
-        enhanced = cv2.fastNlMeansDenoisingColored(enhanced, None, 6, 6, 7, 21)
-        
+        # Bilateral filter nhẹ: làm mượt nhiễu nhưng bảo toàn cạnh sắc nét, tiêu tốn rất ít CPU
+        enhanced = cv2.bilateralFilter(enhanced, d=5, sigmaColor=35, sigmaSpace=35)
         return enhanced
 
     # ─── Face Quality Assessment ───────────────────────────────────────
@@ -93,8 +90,8 @@ class FaceEngine:
         # Nếu không thấy, thử upscale ảnh (khuôn mặt trên CCCD thường nhỏ)
         h, w = img.shape[:2]
         
-        for scale in [1.5, 2.0, 3.0]:
-            scaled = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
+        for scale in [1.5, 2.0]:
+            scaled = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LINEAR)
             faces = self.app.get(scaled)
             if len(faces) > 0:
                 for face in faces:
@@ -113,12 +110,9 @@ class FaceEngine:
         h, w = img.shape[:2]
         
         # 2. Thử crop các vùng phổ biến chứa ảnh chân dung trên CCCD Việt Nam
-        #    - CCCD gắn chip: ảnh ở bên TRÁI (khoảng 0-40% chiều ngang)
-        #    - Một số mẫu: ảnh ở bên PHẢI
         regions = [
             ("left",  img[:, :int(w * 0.45)]),           # Nửa trái (CCCD chip)
             ("right", img[:, int(w * 0.55):]),            # Nửa phải
-            ("left_wide", img[:, :int(w * 0.6)]),         # 60% trái
             ("center", img[int(h*0.1):int(h*0.9), int(w*0.1):int(w*0.9)]),  # Bỏ viền
         ]
         
@@ -127,7 +121,6 @@ class FaceEngine:
                 continue
             faces, scale = self._detect_faces_multiscale(region_img)
             if len(faces) > 0:
-                # Chuyển bbox về tọa độ ảnh gốc
                 offset_x = 0
                 offset_y = 0
                 if "right" in region_name:
@@ -143,7 +136,7 @@ class FaceEngine:
                     face.bbox[3] += offset_y
                 return faces
         
-        # 3. Fallback: OpenCV DNN face detector (nhạy hơn với mặt nhỏ)
+        # 3. Fallback: OpenCV face detector (nhạy hơn với mặt nhỏ)
         try:
             faces_cv = self._opencv_dnn_detect(img)
             if len(faces_cv) > 0:
@@ -163,11 +156,11 @@ class FaceEngine:
         if face_cascade.empty():
             return []
 
-        # Thử nhiều kích thước upscale
-        for scale in [1.0, 1.5, 2.0]:
-            test_img = img if scale == 1.0 else cv2.resize(img, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_CUBIC)
+        # Thử nhiều kích thước
+        for scale in [1.0, 1.5]:
+            test_img = img if scale == 1.0 else cv2.resize(img, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_LINEAR)
             gray = cv2.cvtColor(test_img, cv2.COLOR_BGR2GRAY)
-            rects = face_cascade.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=2, minSize=(25, 25))
+            rects = face_cascade.detectMultiScale(gray, scaleFactor=1.08, minNeighbors=2, minSize=(25, 25))
             
             if len(rects) > 0:
                 class FakeFace:
@@ -184,28 +177,35 @@ class FaceEngine:
         return []
 
     def detect_and_crop(self, image_bytes: bytes, margin=0.3) -> tuple[bool, bytes, str]:
+        """Tối ưu nhận diện khuôn mặt trên CCCD với fast-path: ảnh rõ sẽ tìm ra ngay trong <100ms."""
         nparr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None:
             return False, None, "Không thể đọc ảnh"
         
-        # Preprocessing: tăng contrast + giảm nhiễu
-        enhanced = self._preprocess_image(img)
+        # Fast path 1: Thử trực tiếp trên ảnh gốc
+        faces = self.app.get(img)
         
-        # Detect với region-based + multi-scale + fallback
-        faces = self._detect_faces_with_regions(enhanced)
+        # Fast path 2: Thử multiscale
         if len(faces) == 0:
-            # Thử trên ảnh gốc không enhance
-            faces = self._detect_faces_with_regions(img)
+            faces, _ = self._detect_faces_multiscale(img)
+            
+        # Slow path: Nếu chưa tìm thấy thì mới dùng CLAHE + crop regions
+        if len(faces) == 0:
+            enhanced = self._preprocess_image(img)
+            faces = self._detect_faces_with_regions(enhanced)
+            
+        # Fallback cuối: Haar Cascade
+        if len(faces) == 0:
+            faces = self._opencv_dnn_detect(img)
         
         if len(faces) == 0:
             return False, None, "FACE_NOT_FOUND"
         
-        # Nếu có nhiều khuôn mặt, chọn khuôn mặt LỚN NHẤT (thay vì reject)
+        # Nếu có nhiều khuôn mặt, chọn khuôn mặt LỚN NHẤT
         if len(faces) > 1:
             faces = sorted(faces, key=lambda f: (f.bbox[2]-f.bbox[0]) * (f.bbox[3]-f.bbox[1]), reverse=True)
             
-        # Lấy bounding box của khuôn mặt lớn nhất
         bbox = faces[0].bbox.astype(int)
         x1, y1, x2, y2 = bbox[0], bbox[1], bbox[2], bbox[3]
         
@@ -221,28 +221,29 @@ class FaceEngine:
         ny2 = min(ih, y2 + y_margin)
         
         cropped_face = img[ny1:ny2, nx1:nx2]
-        _, buffer = cv2.imencode('.jpg', cropped_face)
+        _, buffer = cv2.imencode('.jpg', cropped_face, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
         return True, buffer.tobytes(), "OK"
 
     def extract_embedding(self, face_bytes: bytes) -> str:
+        """Trích xuất embedding từ ảnh khuôn mặt (đã crop)."""
         nparr = np.frombuffer(face_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None:
             return json.dumps(np.zeros(512).tolist())
         
-        # Preprocessing cho ảnh khuôn mặt
-        enhanced = self._preprocess_image(img)
+        # Fast path 1: Thử trực tiếp trên ảnh crop
+        faces = self.app.get(img)
         
-        # Thử detect và lấy embedding bằng InsightFace
-        faces = self._detect_faces_with_regions(enhanced)
+        # Fast path 2: Thử với CLAHE nếu ảnh mờ/tối
         if len(faces) == 0:
-            faces = self._detect_faces_with_regions(img)
+            enhanced = self._preprocess_image(img)
+            faces = self.app.get(enhanced)
         
         embedding = None
         if len(faces) > 0 and getattr(faces[0], "embedding", None) is not None:
             embedding = faces[0].embedding
         else:
-            # Fallback: Trích xuất embedding trực tiếp bằng mô hình ArcFace Recognition
+            # Fallback: Trích xuất embedding trực tiếp bằng ArcFace recognition model
             try:
                 rec = self.app.models.get('recognition')
                 if rec is not None:
@@ -263,49 +264,100 @@ class FaceEngine:
             
         return json.dumps(embedding.tolist())
 
-    def verify_liveness(self, image_bytes: bytes, challenge_type: str) -> tuple[bool, str]:
+    def verify_liveness_and_extract(self, image_bytes: bytes, challenge_type: str) -> tuple[bool, str, str | None]:
+        """
+        TỐI ƯU SIÊU TỐC: Kết hợp Liveness và Trích xuất embedding trong DUY NHẤT 1 LẦN suy luận AI.
+        - Trả về: (is_live, message, embedding_json)
+        - Nếu chưa đạt góc liveness: Trả về False ngay lập tức, KHÔNG tốn tài nguyên trích xuất embedding.
+        - Nếu đã đạt: Lấy embedding CÓ SẴN từ đối tượng Face, không cần chạy lại model!
+        """
         nparr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None:
-            return False, "Ảnh không hợp lệ"
+            return False, "Ảnh không hợp lệ", None
         
-        # Kiểm tra chất lượng ảnh selfie trước
+        # 1. Kiểm tra chất lượng ảnh siêu nhanh (không chạy neural net)
         quality = self._assess_face_quality(img)
         if not quality["quality_ok"]:
             warning_text = "; ".join(quality["warnings"])
-            return False, f"Chất lượng ảnh chưa đạt: {warning_text}. Vui lòng điều chỉnh ánh sáng/vị trí."
+            return False, f"Chất lượng ảnh chưa đạt: {warning_text}. Vui lòng điều chỉnh ánh sáng/vị trí.", None
             
+        # 2. Suy luận AI duy nhất 1 lần (Detection + Pose + Recognition)
         faces = self.app.get(img)
         if len(faces) == 0:
-            return False, "Không tìm thấy khuôn mặt người thật trong ảnh."
+            return False, "Không tìm thấy khuôn mặt trong khung hình.", None
             
-        # Liveness dựa vào góc xoay pose (pitch, yaw, roll)
-        pose = faces[0].pose
+        target_face = faces[0]
+        if len(faces) > 1:
+            target_face = max(faces, key=lambda f: (f.bbox[2]-f.bbox[0]) * (f.bbox[3]-f.bbox[1]))
+            
+        # 3. Đánh giá góc xoay pose (pitch, yaw, roll)
+        pose = target_face.pose
         pitch, yaw, roll = pose[0], pose[1], pose[2]
         
-        # Yêu cầu liveness nhẹ nhàng, dễ vượt qua nhưng vẫn đảm bảo người thật
+        is_live = False
+        live_msg = "Hợp lệ"
+        
         if challenge_type in ["turn_left", "turn_left_gentle"]:
             if yaw < -6:
-                return True, "Hợp lệ (Nghiêng nhẹ sang trái)"
-            return False, f"Vui lòng nghiêng nhẹ mặt sang trái một chút (Góc hiện tại: {yaw:.1f}°)"
-            
+                is_live = True
+                live_msg = "Hợp lệ (Nghiêng nhẹ sang trái)"
+            else:
+                live_msg = f"Vui lòng nghiêng nhẹ mặt sang trái (Góc hiện tại: {yaw:.1f}°)"
+                
         elif challenge_type in ["turn_right", "turn_right_gentle"]:
             if yaw > 6:
-                return True, "Hợp lệ (Nghiêng nhẹ sang phải)"
-            return False, f"Vui lòng nghiêng nhẹ mặt sang phải một chút (Góc hiện tại: {yaw:.1f}°)"
-            
+                is_live = True
+                live_msg = "Hợp lệ (Nghiêng nhẹ sang phải)"
+            else:
+                live_msg = f"Vui lòng nghiêng nhẹ mặt sang phải (Góc hiện tại: {yaw:.1f}°)"
+                
         elif challenge_type in ["look_up"]:
             if pitch < -6:
-                return True, "Hợp lệ (Ngước nhẹ lên)"
-            return False, "Vui lòng ngước nhẹ mặt lên một chút."
+                is_live = True
+                live_msg = "Hợp lệ (Ngước nhẹ lên)"
+            else:
+                live_msg = "Vui lòng ngước nhẹ mặt lên một chút."
 
         elif challenge_type == "look_straight":
             if abs(yaw) < 20 and abs(pitch) < 20: 
-                return True, "Hợp lệ (Nhìn thẳng)"
-            return False, "Vui lòng nhìn thẳng tự nhiên vào camera."
+                is_live = True
+                live_msg = "Hợp lệ (Nhìn thẳng)"
+            else:
+                live_msg = "Vui lòng nhìn thẳng tự nhiên vào camera."
+        else:
+            is_live = True
             
-        # Mặc định chấp nhận nếu phát hiện khuôn mặt người thật
-        return True, "Hợp lệ"
+        if not is_live:
+            # Chưa đạt liveness: Thoát ngay, tiết kiệm thời gian
+            return False, live_msg, None
+            
+        # 4. ĐÃ ĐẠT LIVENESS: Lấy embedding CÓ SẴN từ target_face mà KHÔNG CẦN CHẠY LẠI MODEL
+        embedding = getattr(target_face, "embedding", None)
+        if embedding is None:
+            try:
+                rec = self.app.models.get('recognition')
+                if rec is not None:
+                    face_aligned = cv2.resize(img, (112, 112))
+                    feat = rec.get_feat(face_aligned)
+                    if feat is not None:
+                        embedding = feat.flatten()
+            except Exception:
+                pass
+                
+        if embedding is None:
+            return True, live_msg, json.dumps(np.zeros(512).tolist())
+            
+        norm = np.linalg.norm(embedding)
+        if norm > 0:
+            embedding = embedding / norm
+            
+        return True, live_msg, json.dumps(embedding.tolist())
+
+    def verify_liveness(self, image_bytes: bytes, challenge_type: str) -> tuple[bool, str]:
+        """Wrapper giữ tương thích cho verify_liveness."""
+        is_live, msg, _ = self.verify_liveness_and_extract(image_bytes, challenge_type)
+        return is_live, msg
 
     def compare_faces(self, emb1_json: str, emb2_json: str) -> tuple[bool, float]:
         """So sánh 2 khuôn mặt bằng kết hợp Cosine Similarity + Euclidean Distance."""

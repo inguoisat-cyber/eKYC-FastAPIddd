@@ -38,6 +38,13 @@ class EasyOCREngine:
             # Fallback cực đoan nếu vẫn không có thư viện
             return {"raw_texts": []}
 
+        # Tối ưu: Giới hạn kích thước ảnh tối đa 1280px để tăng tốc độ CRAFT detector trên CPU
+        h, w = img.shape[:2]
+        max_dim = 1280
+        if max(h, w) > max_dim:
+            scale = max_dim / float(max(h, w))
+            img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
         # EasyOCR trả về list of tuples: (bbox, text, prob)
         result = self.reader.readtext(img)
         

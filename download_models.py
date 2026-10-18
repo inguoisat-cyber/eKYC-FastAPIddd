@@ -1,20 +1,16 @@
-import sys
+"""Tải trước model để lần chạy đầu không bị chậm / chạy được khi offline.  python download_models.py [--ocr]"""
 import os
+import sys
+from pathlib import Path
 
-# Fix UnicodeEncodeError for Windows console when printing progress bars
-sys.stdout.reconfigure(encoding='utf-8')
+from insightface.app import FaceAnalysis
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "backend"))
+models = Path(os.environ.get("MODELS_DIR", Path(__file__).parent / "models"))
+FaceAnalysis(name=os.environ.get("FACE_MODEL", "buffalo_l"), root=str(models / "insightface"),
+             allowed_modules=["detection", "landmark_3d_68", "recognition"], providers=["CPUExecutionProvider"])
+print("InsightFace: OK")
 
-print("Downloading EasyOCR model...")
-from app.ai.ocr_engine import ocr_engine
-# Accessing reader property triggers the model download
-reader = ocr_engine.reader
-print("EasyOCR model downloaded.")
-
-print("Downloading InsightFace model...")
-from app.ai.face_engine import face_engine
-# Accessing app property triggers the model download
-app = face_engine.app
-print("InsightFace model downloaded.")
-print("All models have been downloaded successfully to the local folders.")
+if "--ocr" in sys.argv:
+    import easyocr
+    easyocr.Reader(["vi", "en"], gpu=False, model_storage_directory=str(models / "easyocr"))
+    print("EasyOCR: OK")

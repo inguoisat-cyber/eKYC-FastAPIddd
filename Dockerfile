@@ -1,37 +1,24 @@
-FROM python:3.10-slim
-
+FROM python:3.12-slim
+ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+# libgl1/libglib2.0-0: OpenCV · libgomp1: ONNX Runtime · libzbar0: đọc QR (không cần build-essential)
+RUN apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libgomp1 libzbar0 \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
-# Cài đặt các thư viện hệ thống cần thiết cho OpenCV, thư viện C++, thư viện xử lý ảnh
-RUN apt-get update && apt-get install -y \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
+# Thứ tự layer: dependency -> model -> code (đổi code không phải tải lại model/thư viện)
+COPY pyproject.toml .
+RUN pip install .
+COPY download_models.py .
+RUN python download_models.py
 
-# Copy file requirements (nếu có) hoặc tạo môi trường từ pyproject.toml
-# Ở đây ta giả sử copy toàn bộ source code (hoặc tạo file requirements.txt tạm)
-COPY pyproject.toml ./
-
-# Cài đặt pip, setuptools
-RUN pip install --no-cache-dir --upgrade pip setuptools
-
-# Cài đặt các thư viện nặng (sử dụng phiên bản CPU để nhẹ image)
-RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
-RUN pip install --no-cache-dir fastapi uvicorn pydantic pydantic-settings sqlalchemy cryptography python-multipart easyocr insightface onnxruntime opencv-python
-
-# Copy toàn bộ code frontend và backend vào container
-# Cấu trúc: 
-# /app/backend
-# /app/frontend
-COPY backend /app/backend
-COPY frontend /app/frontend
-
-# Chuyển working dir vào backend để chạy uvicorn
+COPY backend backend
+COPY frontend frontend
+RUN useradd -m app && mkdir -p data && chown app data
+USER app
+VOLUME /app/data
 WORKDIR /app/backend
-
-# Mở port 8000
 EXPOSE 8000
-
-# Khởi động server
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s \
+    CMD python -c "import urllib.request as u; u.urlopen('http://localhost:8000/api/health')"
+# 1 worker + threadpool: ONNX Runtime đã đa luồng, thêm worker chỉ tốn RAM (mỗi worker nạp lại model)
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

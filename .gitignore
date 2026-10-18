@@ -1,39 +1,10 @@
-# Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# Environment
+*.pyc
+.venv/
 venv/
 .env
-.venv
-
-# User files and database
-backend/ekyc.db
-storage/
-backend/storage/
-*.zip
-
-# OS files
+data/
+models/
+.pytest_cache/
+*.egg-info/
 .DS_Store
-Thumbs.db
